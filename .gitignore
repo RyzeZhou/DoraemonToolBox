@@ -9,4 +9,3 @@ theme.json
 *.log
 output/
 .DS_Store
-scripts/

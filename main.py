@@ -39,11 +39,13 @@ class CustomStyle(QProxyStyle):
         if element == QStyle.PrimitiveElement.PE_IndicatorCheckBox:
             painter.save()
             painter.setRenderHint(QPainter.Antialiasing)
+            # 用 widget.isChecked() 比 option.state 更可靠
+            checked = widget.isChecked() if widget else bool(option.state & QStyle.StateFlag.State_On)
             bg_color = (widget.palette().color(widget.backgroundRole())
                         if widget else QColor("#1e1e1e"))
             painter.fillRect(option.rect, bg_color)
             rect = option.rect.adjusted(1, 1, -1, -1)
-            if option.state & QStyle.StateFlag.State_On:
+            if checked:
                 painter.setBrush(QColor("#0078d4"))
                 painter.setPen(QPen(QColor("#0078d4"), 1))
                 painter.drawRoundedRect(rect, 4, 4)
@@ -51,14 +53,14 @@ class CustomStyle(QProxyStyle):
                                 Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                                 Qt.PenJoinStyle.RoundJoin)
                 painter.setPen(path_pen)
-                x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+                x, y, w, h = float(rect.x()), float(rect.y()), float(rect.width()), float(rect.height())
                 p1 = QPointF(x + w * 0.25, y + h * 0.52)
                 p2 = QPointF(x + w * 0.45, y + h * 0.72)
                 p3 = QPointF(x + w * 0.75, y + h * 0.32)
                 painter.drawLine(p1, p2)
                 painter.drawLine(p2, p3)
             else:
-                # 未勾选：白天模式白底浅灰边框，暗黑模式深灰底深灰边框
+                # 未勾选：暗黑模式深灰底深灰边框，浅色模式白底浅灰边框
                 if self._is_dark:
                     painter.setBrush(QColor("#3c3c3c"))
                     painter.setPen(QPen(QColor("#555555"), 1))
@@ -67,6 +69,22 @@ class CustomStyle(QProxyStyle):
                     painter.setPen(QPen(QColor("#c0c0c0"), 1))
                 painter.drawRoundedRect(rect, 4, 4)
             painter.restore()
+
+        # ── 2. item 视图面板（QComboBox 下拉框 hover/selected）──
+        # QListWidget：QSS 已覆盖颜色，交给 super() 渲染
+        # QComboBox 弹出视图：QSS 匹配不到，直接画
+        elif element == QStyle.PrimitiveElement.PE_PanelItemViewItem:
+            if isinstance(widget, QListWidget):
+                super().drawPrimitive(element, option, painter, widget)
+            elif option.state & (QStyle.StateFlag.State_Selected |
+                                QStyle.StateFlag.State_MouseOver):
+                bg = QColor("#b3d9ff") if not self._is_dark else QColor("#0078d4")
+                painter.save()
+                painter.fillRect(option.rect, bg)
+                painter.restore()
+            else:
+                super().drawPrimitive(element, option, painter, widget)
+
         else:
             super().drawPrimitive(element, option, painter, widget)
 
@@ -231,6 +249,8 @@ class MainWindow(QMainWindow):
         self._is_dark = self._load_theme_preference()
         # 同步到全局 CustomStyle（checkbox 颜色依赖此值）
         _app_custom_style._is_dark = self._is_dark
+        from widgets.parameters import CustomCheckBox
+        CustomCheckBox.set_theme(self._is_dark)  # 初始化复选框主题
 
         self._setup_ui()
         self._load_styles()
@@ -264,6 +284,8 @@ class MainWindow(QMainWindow):
     def _toggle_theme(self):
         self._is_dark = not self._is_dark
         _app_custom_style._is_dark = self._is_dark  # 同步 checkbox 颜色
+        from widgets.parameters import CustomCheckBox
+        CustomCheckBox.set_theme(self._is_dark)      # 刷新自定义复选框
         self._load_styles()
         self._save_theme_preference()
         self._update_theme_btn()
@@ -749,7 +771,7 @@ class MainWindow(QMainWindow):
                     # 布尔参数只有为 True 时才加标志位，不传值
                     if value:
                         args.append(f"--{name}")
-                elif ptype in ('list', 'multi_file', 'list_string'):
+                elif ptype in ('list', 'multi_file', 'multi_directory', 'list_string'):
                     if isinstance(value, list) and value:
                         args.append(f"--{name}")
                         args.extend([str(v) for v in value if v])
@@ -824,6 +846,7 @@ class MainWindow(QMainWindow):
         ti = task['tqdm_interceptor']
         terminal = task['terminal']
         script_name = task['script_name']
+        dedup_cache: set = task.setdefault('_output_dedup', set())
 
         # 检查终端控件是否还存在（用户可能已关闭标签页）
         import shiboken6
@@ -831,7 +854,9 @@ class MainWindow(QMainWindow):
 
         if terminal_alive:
             for line in ti.flush_remaining():
-                terminal.append_text(line + '\n')
+                if line not in dedup_cache:
+                    dedup_cache.add(line)
+                    terminal.append_text(line + '\n')
 
         status = "done" if exit_code == 0 else "failed"
 

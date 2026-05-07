@@ -115,15 +115,8 @@ QComboBox:hover {
     border: 1px solid #0078d4;
 }
 
-QComboBox::drop-down {
-    border: none;
-    width: 20px;
-}
-
-QComboBox::down-arrow {
-    width: 12px;
-    height: 12px;
-    image: url(:/icons/chevron-down.png);
+QComboBox {
+    padding-right: 20px;
 }
 
 /* 数字输入框 */
@@ -151,12 +144,7 @@ QCheckBox::indicator {
     background-color: #3c3c3c;
 }
 
-QCheckBox::indicator:checked {
-    background-color: #0078d4;
-    border: 1px solid #0078d4;
-    image: url(:/icons/check.png);
-}
-
+/* checked 状态由 CustomStyle.drawPrimitive 接管，QSS 不画 */
 QCheckBox::indicator:hover {
     border: 1px solid #0078d4;
 }

@@ -7,9 +7,82 @@ from PySide6.QtWidgets import (
     QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QHBoxLayout, QVBoxLayout,
     QLabel, QMessageBox
 )
-from PySide6.QtCore import Qt, Signal, QUrl
-from PySide6.QtGui import QDragEnterEvent, QDropEvent
+from PySide6.QtCore import Qt, Signal, QUrl, QRect, QPointF
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QPainter, QColor, QPen, QFontMetrics
 from typing import Dict, Any, Optional
+
+
+
+class CustomCheckBox(QCheckBox):
+    """
+    完全自绘复选框，不调用 super().paintEvent()，不受 QSS indicator 样式干扰。
+    深色模式：checked=蓝底白勾 / unchecked=深灰底灰边
+    浅色模式：checked=蓝底白勾 / unchecked=白底浅灰边
+    """
+
+    _is_dark: bool = True
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 完全禁用 QSS 对 indicator 的绘制，让它透明
+        self.setStyleSheet(
+            "QCheckBox{background:transparent;}"
+            "QCheckBox::indicator{background:transparent;border:none;image:none;}"
+        )
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        checked = self.isChecked()
+        palette = self.palette()
+
+        # indicator: 左边 18x18，垂直居中
+        h = self.height()
+        ind = QRect(2, (h - 18) // 2, 18, 18)
+
+        if checked:
+            # 蓝色实心背景
+            p.fillRect(ind, QColor("#0078d4"))
+            # 白勾（三段线）
+            p.setPen(QPen(QColor("#ffffff"), 2,
+                          Qt.PenStyle.SolidLine,
+                          Qt.PenCapStyle.RoundCap,
+                          Qt.PenJoinStyle.RoundJoin))
+            x, y = float(ind.x()), float(ind.y())
+            w, h2 = float(ind.width()), float(ind.height())
+            p.drawLine(x + w*0.25, y + h2*0.52, x + w*0.45, y + h2*0.72)
+            p.drawLine(x + w*0.45, y + h2*0.72, x + w*0.75, y + h2*0.32)
+        else:
+            bg = QColor("#3c3c3c") if self._is_dark else QColor("#ffffff")
+            border_c = QColor("#555555") if self._is_dark else QColor("#c0c0c0")
+            p.fillRect(ind, bg)
+            p.setPen(border_c)
+            p.setBrush(bg)
+            p.drawRoundedRect(ind, 3, 3)
+
+        # label 文字（手动绘制，避免 super() 的干扰）
+        fm = QFontMetrics(self.font())
+        text = self.text()
+        text_x = ind.right() + 8
+        text_y = (h + fm.ascent() - fm.descent()) // 2
+        p.setPen(palette.color(self.foregroundRole()))
+        p.drawText(text_x, text_y, text)
+
+        # focus 框
+        if self.hasFocus():
+            fh = fm.height()
+            fy = (h - fh) // 2
+            p.setPen(QPen(QColor("#0078d4"), 1, Qt.PenStyle.DashLine))
+            p.drawRect(text_x - 2, fy - 2,
+                       fm.boundingRect(text).width() + 4, fh + 4)
+
+    @classmethod
+    def set_theme(cls, is_dark: bool):
+        cls._is_dark = is_dark
+        from PySide6.QtWidgets import QApplication
+        for w in QApplication.allWidgets():
+            if isinstance(w, cls):
+                w.update()
 
 
 class DragDropLineEdit(QLineEdit):
@@ -170,7 +243,7 @@ class ParameterWidget(QWidget):
             self._create_float_control(layout, label)
 
         elif ptype == 'boolean':
-            self.control = QCheckBox()
+            self.control = CustomCheckBox()
             if self._value:
                 self.control.setChecked(True)
             self.control.toggled.connect(self._on_value_changed)
@@ -181,6 +254,9 @@ class ParameterWidget(QWidget):
 
         elif ptype == 'multi_file':
             self._create_multi_file_list_control(layout, label)
+
+        elif ptype == 'multi_directory':
+            self._create_multi_directory_list_control(layout, label)
 
         elif ptype == 'list_string':
             self._create_list_string_control(layout, label)
@@ -716,7 +792,7 @@ class ParameterWidget(QWidget):
             item_layout.addWidget(editor)
 
         elif item_type == 'boolean':
-            editor = QCheckBox()
+            editor = CustomCheckBox()
             editor.setChecked(item_config.get('default', False))
             item_layout.addWidget(editor)
 
@@ -753,6 +829,97 @@ class ParameterWidget(QWidget):
                 all_files = files
             # 使用分号分隔多个文件
             self.control.setText(';'.join(all_files))
+
+    # ---------- multi_directory ----------
+
+    def _create_multi_directory_list_control(self, layout: QFormLayout, label: QLabel):
+        """创建多文件夹输入控件（每行一个目录框，可增删）"""
+        self._multi_directory_rows: list = []
+
+        container = QWidget()
+        vbox = QVBoxLayout()
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(4)
+        container.setLayout(vbox)
+
+        self._multi_directory_rows_widget = QWidget()
+        self._multi_directory_layout = QVBoxLayout()
+        self._multi_directory_layout.setContentsMargins(0, 0, 0, 0)
+        self._multi_directory_layout.setSpacing(4)
+        self._multi_directory_rows_widget.setLayout(self._multi_directory_layout)
+        vbox.addWidget(self._multi_directory_rows_widget)
+
+        layout.addRow(label)
+        layout.addRow(container)
+
+        initial = self._value if isinstance(self._value, list) else []
+        if not initial:
+            self._add_multi_directory_row()
+        else:
+            for v in initial:
+                self._add_multi_directory_row(str(v))
+
+    def _add_multi_directory_row(self, value: str = '', after_idx: int = -1):
+        """添加一行目录输入框"""
+        row = QWidget()
+        row_lay = QHBoxLayout()
+        row_lay.setContentsMargins(0, 0, 0, 0)
+        row_lay.setSpacing(4)
+
+        drag_edit = DragDropLineEdit(mode="directory")
+        drag_edit.setMinimumHeight(28)
+        drag_edit.setText(value)
+        drag_edit.textChanged.connect(self._on_value_changed)
+
+        browse_btn = QPushButton('浏览...')
+        browse_btn.setMinimumHeight(28)
+        browse_btn.clicked.connect(lambda: self._browse_multi_directory_row(drag_edit))
+
+        add_btn = QPushButton('+')
+        add_btn.setMinimumHeight(28)
+        add_btn.setStyleSheet("font: 13pt;")
+        add_btn.setToolTip("在此行后插入一行")
+        add_btn.clicked.connect(lambda: self._insert_multi_directory_row_after(row))
+
+        remove_btn = QPushButton('-')
+        remove_btn.setMinimumHeight(28)
+        remove_btn.setStyleSheet("font: 13pt; color: #cc3333;")
+        remove_btn.setToolTip("删除此行")
+        remove_btn.clicked.connect(lambda: self._remove_multi_directory_row(row, drag_edit))
+
+        row_lay.addWidget(drag_edit, 1)
+        row_lay.addWidget(browse_btn)
+        row_lay.addWidget(add_btn)
+        row_lay.addWidget(remove_btn)
+        row.setLayout(row_lay)
+
+        if after_idx < 0 or after_idx >= self._multi_directory_layout.count():
+            self._multi_directory_layout.addWidget(row)
+        else:
+            self._multi_directory_layout.insertWidget(after_idx + 1, row)
+        self._multi_directory_rows.append(drag_edit)
+
+    def _insert_multi_directory_row_after(self, row_widget: QWidget):
+        idx = self._multi_directory_layout.indexOf(row_widget)
+        self._add_multi_directory_row(after_idx=idx)
+
+    def _remove_multi_directory_row(self, row: QWidget, edit: DragDropLineEdit):
+        if self._multi_directory_layout.count() <= 1:
+            edit.setText('')
+            edit.setFocus()
+            return
+        self._multi_directory_layout.removeWidget(row)
+        row.deleteLater()
+        if edit in self._multi_directory_rows:
+            self._multi_directory_rows.remove(edit)
+        self._on_value_changed()
+
+    def _browse_multi_directory_row(self, edit: DragDropLineEdit):
+        """浏览单个目录"""
+        title = self.param_config.get('dialog_title', '选择目录')
+        dir_path = QFileDialog.getExistingDirectory(self, title)
+        if dir_path:
+            edit.setText(dir_path)
 
     def _on_value_changed(self, *args):
         """值改变信号"""
@@ -814,6 +981,11 @@ class ParameterWidget(QWidget):
 
         elif ptype == 'multi_file':
             values = [e.text().strip() for e in getattr(self, '_multi_file_rows', [])
+                      if e.text().strip()]
+            return values if values else None
+
+        elif ptype == 'multi_directory':
+            values = [e.text().strip() for e in getattr(self, '_multi_directory_rows', [])
                       if e.text().strip()]
             return values if values else None
 
@@ -880,7 +1052,7 @@ class ParameterWidget(QWidget):
                             editor.setValue(float(val))
                         item_layout.addWidget(editor)
                     elif item_type == 'boolean':
-                        editor = QCheckBox()
+                        editor = CustomCheckBox()
                         editor.setChecked(bool(val))
                         item_layout.addWidget(editor)
                     else:
@@ -911,6 +1083,21 @@ class ParameterWidget(QWidget):
                     self._add_multi_file_row(str(v))
             else:
                 self._add_multi_file_row()
+
+        elif ptype == 'multi_directory':
+            if not hasattr(self, '_multi_directory_rows'):
+                return
+            vals = value if isinstance(value, list) else ([value] if value else [])
+            while self._multi_directory_layout.count():
+                w = self._multi_directory_layout.takeAt(0).widget()
+                if w:
+                    w.deleteLater()
+            self._multi_directory_rows.clear()
+            if vals:
+                for v in vals:
+                    self._add_multi_directory_row(str(v))
+            else:
+                self._add_multi_directory_row()
 
         elif ptype == 'list_string':
             if not hasattr(self, '_list_string_rows'):

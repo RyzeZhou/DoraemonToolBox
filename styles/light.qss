@@ -56,15 +56,15 @@ QListWidget::item {
 }
 
 QListWidget::item:selected {
-    background-color: #0078d4;
+    background-color: #b3d9ff;
 }
 
 QListWidget::item:selected QLabel {
-    color: white;
+    color: #1e1e1e;
 }
 
 QListWidget::item:hover {
-    background-color: #e8f0fe;
+    background-color: #d9e8ff;
 }
 
 /* 按钮 */
@@ -122,14 +122,8 @@ QComboBox:hover {
     border: 1px solid #0078d4;
 }
 
-QComboBox::drop-down {
-    border: none;
-    width: 20px;
-}
-
-QComboBox::down-arrow {
-    width: 12px;
-    height: 12px;
+QComboBox {
+    padding-right: 20px;
 }
 
 /* 数字输入框 */
@@ -159,11 +153,7 @@ QCheckBox::indicator {
     background-color: #ffffff;
 }
 
-QCheckBox::indicator:checked {
-    background-color: #0078d4;
-    border: 1px solid #0078d4;
-}
-
+/* checked 状态由 CustomStyle.drawPrimitive 接管，QSS 不画 */
 QCheckBox::indicator:hover {
     border: 1px solid #0078d4;
 }

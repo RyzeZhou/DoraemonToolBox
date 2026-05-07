@@ -67,7 +67,6 @@ class ScriptRegistry:
             return ScriptConfig.from_dict(config_data, script_path, config_path)
 
         # 2. 自动推断（从 docstring 和 argparse）
-        # TODO: 实现 infer_script_config
         return None
 
     def get_script(self, script_id: str) -> Optional[ScriptConfig]:
