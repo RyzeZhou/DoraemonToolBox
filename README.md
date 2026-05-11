@@ -6,6 +6,7 @@ Python 脚本可视化运行中台，支持 YAML 配置化脚本管理、内置�
 ---
 
 ## 功能特性
+<img width="2443" height="1607" alt="图片" src="https://github.com/user-attachments/assets/1548d105-ea52-4a44-93f2-8a2191a27f91" />
 
 ### 脚本管理
 - **YAML 配置驱动**：每个脚本配套 `.yaml` 文件，定义参数类型、默认值、约束条件
