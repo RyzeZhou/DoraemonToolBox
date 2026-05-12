@@ -3,6 +3,7 @@
 哆啦A梦百宝箱 v1.1 - Python 脚本 GUI 中台
 """
 import sys
+import os
 
 # 全局样式实例，供 CustomStyle 注入 _is_dark
 _app_custom_style: "CustomStyle" = None
@@ -247,6 +248,7 @@ class MainWindow(QMainWindow):
         self._running_tasks: Dict[int, dict] = {}
         self._params_auto_loaded = False  # 标记当前脚本参数是否来自自动载入
         self._is_dark = self._load_theme_preference()
+        self._python_path_cache = self._load_python_path_cache()
         # 同步到全局 CustomStyle（checkbox 颜色依赖此值）
         _app_custom_style._is_dark = self._is_dark
         from widgets.parameters import CustomCheckBox
@@ -492,6 +494,17 @@ class MainWindow(QMainWindow):
         top_splitter.addWidget(self.info_browser)
         top_splitter.setStretchFactor(0, 0)  # info_browser 可压缩
 
+        # ── Python 路径配置栏（描述框和参数表单之间）──
+        self._python_path_container = QFrame()
+        self._python_path_container.setFrameShape(QFrame.NoFrame)
+        self._python_path_container.setStyleSheet(
+            "QFrame { border-top: 1px solid #555; padding: 2px 4px; }"
+        )
+        python_path_layout = QHBoxLayout(self._python_path_container)
+        python_path_layout.setContentsMargins(0, 0, 0, 0)
+        python_path_layout.setSpacing(4)
+        top_splitter.addWidget(self._python_path_container)
+
         bottom_splitter = QSplitter(Qt.Horizontal)
 
         # 左：参数配置
@@ -681,6 +694,7 @@ class MainWindow(QMainWindow):
         if script:
             self.current_script = script
             self._display_script_info(script)
+            self._rebuild_python_path_bar(script)
             self._build_parameter_form(script)
             # 有缓存时静默自动载入，不弹窗
             cache = self._load_param_cache()
@@ -760,6 +774,54 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "参数错误", "\n".join(f"• {e}" for e in errors))
             return
 
+        # 校验Python路径是否存在（直接从控件当前值读取，不读缓存）
+        python_path = self._get_script_python_path(self.current_script.id)
+        # 从控件实时获取当前模式
+        mode_index = self._python_path_container.findChild(QComboBox).currentIndex() if self._python_path_container.findChild(QComboBox) else 0
+        # 重新获取模式combo的当前值
+        mode_combo = None
+        for child in self._python_path_container.findChildren(QComboBox):
+            if child.currentData() in ('system', 'conda', 'custom'):
+                mode_combo = child
+                break
+        current_mode = mode_combo.currentData() if mode_combo else 'system'
+
+        if current_mode == 'conda':
+            # 从conda combo实时读取
+            conda_combo = None
+            for child in self._python_path_container.findChildren(QComboBox):
+                if child != mode_combo:
+                    conda_combo = child
+                    break
+            conda_name = conda_combo.currentData() or '' if conda_combo else ''
+            if not conda_name:
+                QMessageBox.warning(self, "Python路径错误", "未选择conda环境，请先在Python路径配置中选择环境")
+                return
+            env_names = [name for name, path in self._detect_conda_envs()]
+            if conda_name not in env_names:
+                reply = QMessageBox.question(
+                    self, "Python路径错误",
+                    f"conda环境 '{conda_name}' 不存在，将使用系统默认Python继续运行。\n是否继续？",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                )
+                if reply == QMessageBox.No:
+                    return
+        elif current_mode == 'custom':
+            # 从编辑框实时读取
+            custom_edit = self._python_path_container.findChild(QLineEdit)
+            custom_path = custom_edit.text().strip() if custom_edit else ''
+            if not custom_path:
+                QMessageBox.warning(self, "Python路径错误", "未指定Python解释器路径，请先在Python路径配置中指定")
+                return
+            if not os.path.exists(custom_path):
+                reply = QMessageBox.question(
+                    self, "Python路径错误",
+                    f"Python路径不存在：\n{custom_path}\n将使用系统默认Python继续运行。\n是否继续？",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                )
+                if reply == QMessageBox.No:
+                    return
+
         args = []
         for name, value in params.items():
             if value is None or value == '':
@@ -800,7 +862,8 @@ class MainWindow(QMainWindow):
         sh.yn_prompt_detected.connect(lambda prompt, idx=tab_index: None)
         sh.text_prompt_detected.connect(lambda prompt, idx=tab_index: None)
 
-        success = pm.start(script_path=self.current_script.script_path, arguments=args)
+        python_path = self._get_script_python_path(self.current_script.id)
+        success = pm.start(script_path=self.current_script.script_path, arguments=args, python_path=python_path)
         if not success:
             QMessageBox.critical(self, "启动失败", "无法启动脚本进程")
             self.terminal_tabs.update_tab_title(tab_index, script_name, "failed")
@@ -964,7 +1027,260 @@ class MainWindow(QMainWindow):
         if isinstance(terminal, TerminalWidget):
             terminal.clear_terminal()
 
-    # ── 其他 ─────────────────────────────────────
+    # ── Python 路径配置（每个脚本独立记忆）──────────────
+    def _load_python_path_cache(self) -> Dict[str, dict]:
+        """加载每个脚本的Python路径缓存 {script_id: {mode, conda_name, custom_path}}"""
+        if self._param_cache_path.exists():
+            try:
+                data = json.loads(self._param_cache_path.read_text(encoding='utf-8'))
+                return data.get('_python_paths', {})
+            except Exception:
+                pass
+        return {}
+
+    def _save_python_path_cache(self, script_id: str, mode: str, conda_name: str = '', custom_path: str = '') -> None:
+        """保存单个脚本的Python路径配置到param_cache.json
+        注意：系统默认模式不写入缓存，切换回system时删除该脚本的记录"""
+        cache = self._load_param_cache()
+        python_paths = cache.get('_python_paths', {})
+        if mode == 'system':
+            # 系统默认不记忆，删除已有记录
+            python_paths.pop(script_id, None)
+        else:
+            python_paths[script_id] = {'mode': mode, 'conda_name': conda_name, 'custom_path': custom_path}
+        cache['_python_paths'] = python_paths
+        try:
+            with open(self._param_cache_path, 'w', encoding='utf-8') as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _get_script_python_path(self, script_id: str) -> Optional[str]:
+        """根据脚本ID获取实际要使用的Python解释器路径
+        如果路径/环境不存在，返回None（回退到sys.executable）"""
+        cache = self._load_python_path_cache()
+        cfg = cache.get(script_id, {})
+        mode = cfg.get('mode', 'system')
+        if mode == 'system':
+            return None  # 使用 sys.executable
+        elif mode == 'conda':
+            conda_envs = self._detect_conda_envs()
+            conda_name = cfg.get('conda_name', '')
+            for name, path in conda_envs:
+                if name == conda_name:
+                    return path
+            # 环境不存在，返回None
+            return None
+        elif mode == 'custom':
+            custom_path = cfg.get('custom_path', '')
+            if custom_path and os.path.exists(custom_path):
+                return custom_path
+            # 路径不存在，返回None
+            return None
+        return None
+
+    def _detect_conda_envs(self) -> list:
+        """自动检测系统上的conda环境，返回 [(name, python_path), ...]"""
+        envs = []
+        import glob
+        # 常见conda安装路径
+        conda_roots = []
+        # 当前conda
+        import shutil
+        conda_exe = shutil.which('conda')
+        if conda_exe:
+            import subprocess
+            try:
+                result = subprocess.run([conda_exe, 'env', 'list', '--json'], capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    data = json.loads(result.stdout)
+                    for p in data.get('envs', []):
+                        name = os.path.basename(p) or 'base'
+                        python_path = os.path.join(p, 'python.exe' if sys.platform == 'win32' else 'bin', 'python')
+                        if os.path.exists(python_path):
+                            envs.append((name, python_path))
+                    return envs
+            except Exception:
+                pass
+        # 回退：常见路径扫描
+        home = Path.home()
+        patterns = [
+            home / 'Miniconda3' / 'envs' / '*' / ('python.exe' if sys.platform == 'win32' else 'bin/python'),
+            home / 'anaconda3' / 'envs' / '*' / ('python.exe' if sys.platform == 'win32' else 'bin/python'),
+            home / '.conda' / 'envs' / '*' / ('python.exe' if sys.platform == 'win32' else 'bin/python'),
+        ]
+        for pattern in patterns:
+            for p in glob.glob(str(pattern)):
+                name = os.path.basename(os.path.dirname(os.path.dirname(p) if sys.platform != 'win32' else os.path.dirname(p)))
+                envs.append((name, p))
+        return envs
+
+    def _rebuild_python_path_bar(self, script: ScriptConfig):
+        """重建Python路径配置栏（切换脚本时调用）- 单行布局"""
+        from PySide6.QtWidgets import QComboBox, QLineEdit, QPushButton, QLabel
+
+        container = self._python_path_container
+        main_layout = container.layout()
+
+        # 清除旧控件
+        while main_layout.count():
+            item = main_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # ── 单行：🐍 Python: [模式下拉] [路径区域] ──
+        main_layout.addWidget(QLabel("🐍 Python:"))
+
+        mode_combo = QComboBox()
+        mode_combo.addItem("系统默认", "system")
+        mode_combo.addItem("Conda环境", "conda")
+        mode_combo.addItem("自定义路径", "custom")
+        mode_combo.setMinimumWidth(110)
+        main_layout.addWidget(mode_combo)
+
+        # 路径区域控件（根据模式显示/隐藏）
+        # 系统默认：只读标签
+        sys_label = QLabel()
+        sys_label.setStyleSheet("color: #888; font-size: 11px;")
+        main_layout.addWidget(sys_label, stretch=1)
+
+        # conda：环境下拉
+        conda_combo = QComboBox()
+        conda_combo.setMinimumWidth(180)
+        conda_envs = self._detect_conda_envs()
+        for name, path in conda_envs:
+            conda_combo.addItem(f"{name}  ({path})", name)
+        conda_combo.setVisible(False)
+        main_layout.addWidget(conda_combo, stretch=1)
+
+        # 自定义：路径输入+浏览
+        custom_edit = QLineEdit()
+        custom_edit.setPlaceholderText("输入 python.exe 完整路径")
+        custom_edit.setVisible(False)
+        main_layout.addWidget(custom_edit, stretch=1)
+
+        btn_browse = QPushButton("浏览…")
+        btn_browse.setFixedWidth(55)
+        btn_browse.setVisible(False)
+        main_layout.addWidget(btn_browse)
+
+        # 错误提示（紧跟在路径区域后面）
+        error_label = QLabel("")
+        error_label.setStyleSheet("color: #ff4444; font-size: 11px;")
+        error_label.setVisible(False)
+        main_layout.addWidget(error_label)
+
+        main_layout.addStretch()
+
+        # 加载缓存
+        cache = self._load_python_path_cache()
+        cfg = cache.get(script.id, {})
+        mode = cfg.get('mode', 'system')
+        idx = mode_combo.findData(mode)
+        if idx >= 0:
+            mode_combo.setCurrentIndex(idx)
+
+        def validate_and_show_error(m, custom_path_from_edit=None):
+            """校验路径/环境是否存在，不存在则红显+显示错误"""
+            if m == 'system':
+                container.setStyleSheet("QFrame { border-top: 1px solid #555; padding: 2px 4px; }")
+                error_label.setVisible(False)
+                return True
+            elif m == 'conda':
+                conda_name = conda_combo.currentData() or ''
+                if not conda_name:
+                    container.setStyleSheet("QFrame { border: 1px solid #ff4444; border-radius: 3px; padding: 2px 4px; }")
+                    error_label.setText("⚠ 未选择conda环境")
+                    error_label.setVisible(True)
+                    return False
+                env_names = [name for name, path in conda_envs]
+                if conda_name not in env_names:
+                    container.setStyleSheet("QFrame { border: 1px solid #ff4444; border-radius: 3px; padding: 2px 4px; }")
+                    error_label.setText(f"⚠ conda环境 '{conda_name}' 不存在")
+                    error_label.setVisible(True)
+                    return False
+                container.setStyleSheet("QFrame { border-top: 1px solid #555; padding: 2px 4px; }")
+                error_label.setVisible(False)
+                return True
+            elif m == 'custom':
+                custom_p = custom_path_from_edit if custom_path_from_edit is not None else custom_edit.text().strip()
+                if not custom_p:
+                    container.setStyleSheet("QFrame { border: 1px solid #ff4444; border-radius: 3px; padding: 2px 4px; }")
+                    error_label.setText("⚠ 未指定Python路径")
+                    error_label.setVisible(True)
+                    return False
+                if not os.path.exists(custom_p):
+                    container.setStyleSheet("QFrame { border: 1px solid #ff4444; border-radius: 3px; padding: 2px 4px; }")
+                    error_label.setText(f"⚠ 路径不存在: {custom_p}")
+                    error_label.setVisible(True)
+                    return False
+                container.setStyleSheet("QFrame { border-top: 1px solid #555; padding: 2px 4px; }")
+                error_label.setVisible(False)
+                return True
+            return True
+
+        def on_mode_changed(index):
+            m = mode_combo.itemData(index)
+            sys_label.setVisible(False)
+            conda_combo.setVisible(False)
+            custom_edit.setVisible(False)
+            btn_browse.setVisible(False)
+
+            if m == 'system':
+                sys_label.setText(f"当前: {sys.executable}")
+                sys_label.setVisible(True)
+            elif m == 'conda':
+                conda_combo.setVisible(True)
+            elif m == 'custom':
+                custom_edit.setVisible(True)
+                btn_browse.setVisible(True)
+
+            validate_and_show_error(m)
+
+        def on_browse():
+            file_path, _ = QFileDialog.getOpenFileName(container, "选择 Python 解释器", "", "Python (*.exe);;All Files (*)")
+            if file_path:
+                custom_edit.setText(file_path)
+                validate_and_show_error('custom', custom_path_from_edit=file_path)
+
+        def on_mode_saved(index):
+            m = mode_combo.itemData(index)
+            conda_name = conda_combo.currentData() or '' if m == 'conda' else ''
+            custom_path = custom_edit.text().strip() if m == 'custom' else ''
+            self._save_python_path_cache(script.id, m, conda_name, custom_path)
+
+        def on_conda_changed():
+            conda_name = conda_combo.currentData() or ''
+            self._save_python_path_cache(script.id, 'conda', conda_name, '')
+            validate_and_show_error('conda')
+
+        def on_custom_changed():
+            custom_path = custom_edit.text().strip()
+            self._save_python_path_cache(script.id, 'custom', '', custom_path)
+            validate_and_show_error('custom')
+
+        mode_combo.currentIndexChanged.connect(on_mode_changed)
+        mode_combo.currentIndexChanged.connect(on_mode_saved)
+        conda_combo.currentIndexChanged.connect(on_conda_changed)
+        custom_edit.editingFinished.connect(on_custom_changed)
+        btn_browse.clicked.connect(on_browse)
+
+        # 触发初始化
+        on_mode_changed(mode_combo.currentIndex())
+
+        # 恢复conda/custom选择
+        if mode == 'conda':
+            conda_name = cfg.get('conda_name', '')
+            ci = conda_combo.findData(conda_name)
+            if ci >= 0:
+                conda_combo.setCurrentIndex(ci)
+        elif mode == 'custom':
+            custom_edit.setText(cfg.get('custom_path', ''))
+
+        # 初始校验
+        if mode != 'system':
+            validate_and_show_error(mode)
+
     def _show_about(self):
         """显示关于对话框"""
         QMessageBox.about(
@@ -981,6 +1297,7 @@ class MainWindow(QMainWindow):
             "<li>文件拖拽输入</li>"
             "<li>脚本搜索 / 排序 / 标签</li>"
             "<li>亮色 / 暗色主题切换</li>"
+            "<li>自定义 Python 解释器路径（conda 兼容）</li>"
             "</ul>"
             "<p style='color:#888;'>统一脚本工具框架 — 让小工具拥有 GUI</p>"
         )
@@ -1124,7 +1441,7 @@ class MainWindow(QMainWindow):
                     pass
 
     def _reset_to_defaults(self) -> None:
-        """将所有参数控件恢复为 YAML 里的默认值"""
+        """将所有参数控件恢复为 YAML 里的默认值，同时重置Python路径"""
         if not self.current_script:
             return
         for widget in self.param_widgets:
@@ -1133,6 +1450,9 @@ class MainWindow(QMainWindow):
                 widget.set_value(default_val)
             except Exception:
                 pass
+        # 重置Python路径为系统默认
+        self._save_python_path_cache(self.current_script.id, 'system')
+        self._rebuild_python_path_bar(self.current_script)
 
     def closeEvent(self, event):
         running = [(idx, t) for idx, t in self._running_tasks.items() if t['process_manager'].is_running()]

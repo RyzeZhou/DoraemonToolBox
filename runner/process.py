@@ -32,7 +32,7 @@ class ProcessManager(QObject):
         """设置工作目录"""
         self._working_directory = Path(path)
 
-    def start(self, script_path: Path, arguments: List[str], env: Optional[Dict[str, str]] = None) -> bool:
+    def start(self, script_path: Path, arguments: List[str], env: Optional[Dict[str, str]] = None, python_path: Optional[str] = None) -> bool:
         """
         启动脚本
 
@@ -40,6 +40,7 @@ class ProcessManager(QObject):
             script_path: 脚本路径
             arguments: 命令行参数列表（格式: ['--file', 'path', '--count', '10']）
             env: 环境变量字典
+            python_path: 自定义 Python 解释器路径（如 conda 环境的 python.exe），为 None 时使用 sys.executable
 
         Returns:
             是否成功启动
@@ -82,8 +83,8 @@ class ProcessManager(QObject):
         # 优先使用 python 执行 .py 文件，如果是 .exe 或其他则直接执行
         script_file = str(script_path)
         if script_path.suffix == '.py':
-            # 使用 sys.executable 确保使用相同的 Python 环境
-            program = sys.executable
+            # 优先使用用户指定的 python 路径，其次使用 sys.executable
+            program = python_path if python_path else sys.executable
             args = [script_file] + arguments
         else:
             program = script_file
