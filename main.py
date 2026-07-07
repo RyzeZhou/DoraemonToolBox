@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-哆啦A梦百宝箱 v1.1 - Python 脚本 GUI 中台
+哆啦A梦百宝箱 v1.2 - Python 脚本 GUI 中台
 """
 import sys
 import os
@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QLabel, QPushButton, QToolBar,
     QTextBrowser, QTabWidget, QScrollArea, QFormLayout,
     QMessageBox, QFileDialog, QStatusBar, QProgressBar,
-    QSplitter, QLineEdit, QComboBox, QFrame, QMenu
+    QSplitter, QLineEdit, QComboBox, QFrame, QMenu, QSizePolicy, QGridLayout
 )
 from PySide6.QtCore import Qt, QSize, Signal, QTimer, QPointF
 from PySide6.QtGui import QAction, QKeySequence, QFont, QPainter, QColor, QPen, QPalette
@@ -235,7 +235,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("哆啦A梦百宝箱 v1.1")
+        self.setWindowTitle("哆啦A梦百宝箱 v1.2")
         self.setMinimumSize(1400, 900)
 
         self.registry = ScriptRegistry(script_dirs=[Path('scripts')])
@@ -402,37 +402,26 @@ class MainWindow(QMainWindow):
             self.sort_combo.addItem(label, mode)
         self.sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         sort_row.addWidget(self.sort_combo, stretch=1)
-        left_lay.addLayout(sort_row)
 
-        tag_row = QHBoxLayout()
-        tag_row.addWidget(QLabel("🏷"))
-        tag_row.addStretch()
+        self.tag_filter_btn = QPushButton("标签")
+        self.tag_filter_btn.setFixedHeight(26)
+        self.tag_filter_btn.setMinimumWidth(72)
+        self.tag_filter_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.tag_filter_btn.clicked.connect(self._show_tag_popup)
+        sort_row.addWidget(self.tag_filter_btn)
+
         self.clear_tags_btn = QPushButton("清除")
-        self.clear_tags_btn.setFixedSize(36, 22)
+        self.clear_tags_btn.setFixedSize(36, 26)
         self.clear_tags_btn.setStyleSheet("font-size: 8pt; padding: 0;")
         self.clear_tags_btn.clicked.connect(self._clear_tag_filters)
         self.clear_tags_btn.setVisible(False)
-        tag_row.addWidget(self.clear_tags_btn)
-        left_lay.addLayout(tag_row)
+        sort_row.addWidget(self.clear_tags_btn)
+        left_lay.addLayout(sort_row)
 
-        # 标签滚动区 - 高 DPI 下留足空间，始终预留滚动条高度避免漂移
-        self.tag_scroll = QScrollArea()
-        self.tag_scroll.setFixedHeight(44)  # 加高，175% DPI 下标签+滚动条不截断
-        self.tag_scroll.setWidgetResizable(True)
-        self.tag_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)  # 始终显示，避免出现/消失引起跳动
-        self.tag_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.tag_scroll.setFrameShape(QFrame.NoFrame)
-        # 滚动条细一些
-        self.tag_scroll.setStyleSheet(
-            "QScrollBar:horizontal { height: 12px; }"
-        )
-        self.tag_container = QWidget()
-        self.tag_layout = QHBoxLayout(self.tag_container)
-        self.tag_layout.setContentsMargins(0, 2, 0, 0)  # 上边距给标签文字留空间
-        self.tag_layout.setSpacing(6)
-        self.tag_layout.addStretch()
-        self.tag_scroll.setWidget(self.tag_container)
-        left_lay.addWidget(self.tag_scroll)
+        self._all_tags: List[str] = []
+        self._tag_popup: Optional[QFrame] = None
+        self._tag_search_input: Optional[QLineEdit] = None
+        self._tag_grid_widget: Optional[QWidget] = None
 
         # 脚本列表
         self.script_list = QListWidget()
@@ -487,7 +476,7 @@ class MainWindow(QMainWindow):
         desc_font = self.info_browser.font()
         desc_font.setPointSize(10)
         self.info_browser.setFont(desc_font)
-        right_lay.addWidget(self.info_browser)
+        self.info_browser.setMinimumHeight(130)
 
         # ── 描述区域 + 参数配置 + 终端输出 可拖动分割 ──
         top_splitter = QSplitter(Qt.Vertical)
@@ -497,11 +486,13 @@ class MainWindow(QMainWindow):
         # ── Python 路径配置栏（描述框和参数表单之间）──
         self._python_path_container = QFrame()
         self._python_path_container.setFrameShape(QFrame.NoFrame)
+        self._python_path_container.setFixedHeight(40)
+        self._python_path_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._python_path_container.setStyleSheet(
             "QFrame { border-top: 1px solid #555; padding: 2px 4px; }"
         )
         python_path_layout = QHBoxLayout(self._python_path_container)
-        python_path_layout.setContentsMargins(0, 0, 0, 0)
+        python_path_layout.setContentsMargins(0, 2, 0, 2)
         python_path_layout.setSpacing(4)
         top_splitter.addWidget(self._python_path_container)
 
@@ -533,19 +524,26 @@ class MainWindow(QMainWindow):
         self.terminal_tabs.tab_finished.connect(self._on_task_tab_finished)
         self.terminal_tabs.currentChanged.connect(self._on_terminal_tab_changed)
         term_lay.addWidget(self.terminal_tabs)
+
+        # 进度条跟随终端标签页，归属于终端输出栏
+        self.progress_widget = ProgressWidget()
+        self.progress_widget.setFixedHeight(50)
+        self.progress_widget.hide_progress()
+        term_lay.addWidget(self.progress_widget)
+
         bottom_splitter.addWidget(term_box)
 
         # 参数区较窄，终端区较宽
         bottom_splitter.setSizes([350, 700])
 
         top_splitter.addWidget(bottom_splitter)
+        top_splitter.setCollapsible(0, False)
+        top_splitter.setCollapsible(1, False)
+        top_splitter.setCollapsible(2, False)
         top_splitter.setStretchFactor(1, 1)  # bottom_splitter 获得拉伸权重
+        top_splitter.setStretchFactor(2, 8)
+        top_splitter.setSizes([150, 40, 650])
         right_lay.addWidget(top_splitter, stretch=1)
-
-        # 进度条
-        self.progress_widget = ProgressWidget()
-        self.progress_widget.setFixedHeight(50)
-        right_lay.addWidget(self.progress_widget)
 
         main_splitter.addWidget(right)
         main_splitter.setSizes([280, 1120])
@@ -579,21 +577,99 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "扫描警告", "\n".join(errors))
 
     def _rebuild_tag_buttons(self):
-        while self.tag_layout.count() > 1:
-            item = self.tag_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
         all_tags: Set[str] = set()
         for script in self.registry.list_scripts():
             all_tags.update(script.tags)
 
-        for tag in sorted(all_tags):
+        self._all_tags = sorted(all_tags, key=lambda t: t.lower())
+        self._update_tag_filter_button()
+        if self._tag_popup and self._tag_popup.isVisible():
+            self._rebuild_tag_popup_tags()
+
+    def _show_tag_popup(self):
+        if not self._tag_popup:
+            self._tag_popup = QFrame(self, Qt.Popup)
+            self._tag_popup.setFrameShape(QFrame.StyledPanel)
+            self._tag_popup.setFixedWidth(520)
+            self._tag_popup.setStyleSheet(
+                "QFrame { border: 1px solid #666; border-radius: 4px; }"
+            )
+
+            popup_lay = QVBoxLayout(self._tag_popup)
+            popup_lay.setContentsMargins(8, 8, 8, 8)
+            popup_lay.setSpacing(8)
+
+            self._tag_search_input = QLineEdit()
+            self._tag_search_input.setPlaceholderText("搜索标签...")
+            self._tag_search_input.setClearButtonEnabled(True)
+            self._tag_search_input.setFixedHeight(28)
+            self._tag_search_input.textChanged.connect(self._rebuild_tag_popup_tags)
+            popup_lay.addWidget(self._tag_search_input)
+
+            tag_scroll = QScrollArea()
+            tag_scroll.setWidgetResizable(True)
+            tag_scroll.setFrameShape(QFrame.NoFrame)
+            tag_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            tag_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            tag_scroll.setMinimumHeight(120)
+            tag_scroll.setFixedHeight(290)
+
+            self._tag_grid_widget = QWidget()
+            tag_scroll.setWidget(self._tag_grid_widget)
+            popup_lay.addWidget(tag_scroll)
+
+        self._tag_search_input.clear()
+        self._rebuild_tag_popup_tags()
+
+        popup_width = 520
+        popup_height = 360
+        self._tag_popup.resize(popup_width, popup_height)
+        pos = self.tag_filter_btn.mapToGlobal(self.tag_filter_btn.rect().topRight())
+        self._tag_popup.move(pos.x() + 6, pos.y())
+        self._tag_popup.show()
+        self._tag_search_input.setFocus()
+
+    def _rebuild_tag_popup_tags(self):
+        if not self._tag_grid_widget:
+            return
+
+        old_layout = self._tag_grid_widget.layout()
+        if old_layout:
+            while old_layout.count():
+                item = old_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            old_layout.deleteLater()
+
+        grid = QGridLayout(self._tag_grid_widget)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(6)
+
+        query = self._tag_search_input.text().strip().lower() if self._tag_search_input else ""
+        tags = [tag for tag in self._all_tags if not query or query in tag.lower()]
+        columns = 3
+        for index, tag in enumerate(tags):
             btn = TagButton(tag)
-            if tag in self._active_tags:
-                btn.setChecked(True)
+            btn.setMinimumWidth(150)
+            btn.setChecked(tag in self._active_tags)
             btn.toggled_filter.connect(self._on_tag_toggled)
-            self.tag_layout.insertWidget(self.tag_layout.count() - 1, btn)
+            row, col = divmod(index, columns)
+            grid.addWidget(btn, row, col)
+
+        if not tags:
+            empty = QLabel("没有匹配标签")
+            empty.setStyleSheet("color: #888; padding: 8px;")
+            grid.addWidget(empty, 0, 0)
+
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        self._tag_grid_widget.adjustSize()
+
+    def _update_tag_filter_button(self):
+        count = len(self._active_tags)
+        self.tag_filter_btn.setText(f"标签({count})" if count else "标签")
+        self.clear_tags_btn.setVisible(count > 0)
 
     def _refresh_script_list(self):
         scripts = self.registry.list_scripts()
@@ -670,16 +746,14 @@ class MainWindow(QMainWindow):
             self._active_tags.add(tag)
         else:
             self._active_tags.discard(tag)
-        self.clear_tags_btn.setVisible(len(self._active_tags) > 0)
+        self._update_tag_filter_button()
         self._refresh_script_list()
 
     def _clear_tag_filters(self):
         self._active_tags.clear()
-        for i in range(self.tag_layout.count()):
-            item = self.tag_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), TagButton):
-                item.widget().setChecked(False)
-        self.clear_tags_btn.setVisible(False)
+        self._update_tag_filter_button()
+        if self._tag_popup and self._tag_popup.isVisible():
+            self._rebuild_tag_popup_tags()
         self._refresh_script_list()
 
     # ── 脚本选择 ─────────────────────────────────
@@ -761,6 +835,7 @@ class MainWindow(QMainWindow):
     # ── 终端 tab 切换 → 更新终止按钮 ─────────────
     def _on_terminal_tab_changed(self, index: int):
         self._update_stop_buttons()
+        self._sync_progress_widget_to_current_tab()
 
     # ── 脚本运行 ─────────────────────────────────
     def _run_selected_script(self):
@@ -774,17 +849,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "参数错误", "\n".join(f"• {e}" for e in errors))
             return
 
-        # 校验Python路径是否存在（直接从控件当前值读取，不读缓存）
-        python_path = self._get_script_python_path(self.current_script.id)
-        # 从控件实时获取当前模式
-        mode_index = self._python_path_container.findChild(QComboBox).currentIndex() if self._python_path_container.findChild(QComboBox) else 0
-        # 重新获取模式combo的当前值
+        # 校验Python路径不存在（从控件实时读取，不依赖缓存）
         mode_combo = None
         for child in self._python_path_container.findChildren(QComboBox):
             if child.currentData() in ('system', 'conda', 'custom'):
                 mode_combo = child
                 break
         current_mode = mode_combo.currentData() if mode_combo else 'system'
+        python_path = None  # None → 使用 sys.executable
 
         if current_mode == 'conda':
             # 从conda combo实时读取
@@ -806,6 +878,11 @@ class MainWindow(QMainWindow):
                 )
                 if reply == QMessageBox.No:
                     return
+            # 校验通过，从conda环境列表取实际路径
+            for name, path in self._detect_conda_envs():
+                if name == conda_name:
+                    python_path = path
+                    break
         elif current_mode == 'custom':
             # 从编辑框实时读取
             custom_edit = self._python_path_container.findChild(QLineEdit)
@@ -821,6 +898,8 @@ class MainWindow(QMainWindow):
                 )
                 if reply == QMessageBox.No:
                     return
+            # 校验通过，直接使用实时读取的路径
+            python_path = custom_path
 
         args = []
         for name, value in params.items():
@@ -854,6 +933,7 @@ class MainWindow(QMainWindow):
             'stdin_handler': sh, 'terminal': terminal,
             'script_name': script_name, 'script_config': self.current_script,
             'tab_index': tab_index,
+            'progress_percent': 0, 'progress_text': '', 'has_tqdm': False,
         }
         self._running_tasks[tab_index] = task_info
         self._connect_task_signals(task_info, tab_index)
@@ -862,7 +942,7 @@ class MainWindow(QMainWindow):
         sh.yn_prompt_detected.connect(lambda prompt, idx=tab_index: None)
         sh.text_prompt_detected.connect(lambda prompt, idx=tab_index: None)
 
-        python_path = self._get_script_python_path(self.current_script.id)
+        # 使用前面从UI控件实时读取的python_path，不依赖缓存
         success = pm.start(script_path=self.current_script.script_path, arguments=args, python_path=python_path)
         if not success:
             QMessageBox.critical(self, "启动失败", "无法启动脚本进程")
@@ -871,6 +951,7 @@ class MainWindow(QMainWindow):
 
         self.terminal_tabs.update_tab_title(tab_index, script_name, "running")
         self.terminal_tabs.setCurrentIndex(tab_index)
+        self._sync_progress_widget_to_current_tab()
         self._update_running_label()
         self._update_stop_buttons()
         self._save_param_cache()
@@ -890,7 +971,13 @@ class MainWindow(QMainWindow):
                 dedup_cache.add(line)
                 terminal.append_text(line)
 
-        ti.process_output(text)
+        if ti.process_output(text) is not None:
+            task['progress_percent'] = ti.get_last_percentage()
+            task['progress_text'] = ti.get_last_detail()
+            task['has_tqdm'] = True
+            if self.terminal_tabs.currentIndex() == tab_index:
+                self.progress_widget.show_progress()
+                self.progress_widget.update_progress(task['progress_percent'], task['progress_text'])
         if sh.process_output(text):
             QTimer.singleShot(100, lambda idx=tab_index: self._handle_stdin_interaction(idx))
 
@@ -898,8 +985,14 @@ class MainWindow(QMainWindow):
         task = self._running_tasks.get(tab_index)
         if not task:
             return
-        if self.terminal_tabs.currentIndex() == tab_index:
-            self.progress_widget.update_progress(task['tqdm_interceptor'].get_last_percentage())
+        ti = task['tqdm_interceptor']
+        task['progress_percent'] = ti.get_last_percentage()
+        task['progress_text'] = ti.get_last_detail()
+        if task.get('progress_text') or task['progress_percent']:
+            task['has_tqdm'] = True
+        if self.terminal_tabs.currentIndex() == tab_index and task.get('has_tqdm'):
+            self.progress_widget.show_progress()
+            self.progress_widget.update_progress(task['progress_percent'], task['progress_text'])
 
     def _on_task_finished(self, tab_index: int, exit_code: int):
         task = self._running_tasks.get(tab_index)
@@ -936,12 +1029,24 @@ class MainWindow(QMainWindow):
         self._update_running_label()
         self._update_stop_buttons()
         if self.terminal_tabs.currentIndex() == tab_index:
-            self.progress_widget.reset()
+            self._sync_progress_widget_to_current_tab()
 
     def _on_task_tab_finished(self, tab_index: int, exit_code: int, script_name: str):
         pass
 
     # ── 进度 & 状态 ─────────────────────────────
+    def _sync_progress_widget_to_current_tab(self):
+        idx = self.terminal_tabs.currentIndex()
+        task = self._running_tasks.get(idx)
+        if not task or not task.get('has_tqdm'):
+            self.progress_widget.reset()
+            self.progress_widget.hide_progress()
+            return
+        percent = task.get('progress_percent', 0)
+        detail = task.get('progress_text', '')
+        self.progress_widget.show_progress()
+        self.progress_widget.update_progress(percent, detail)
+
     def _update_running_label(self):
         count = sum(1 for t in self._running_tasks.values() if t['process_manager'].is_running())
         if count > 0:
@@ -1121,6 +1226,7 @@ class MainWindow(QMainWindow):
 
         container = self._python_path_container
         main_layout = container.layout()
+        row_height = 28
 
         # 清除旧控件
         while main_layout.count():
@@ -1129,24 +1235,35 @@ class MainWindow(QMainWindow):
                 item.widget().deleteLater()
 
         # ── 单行：🐍 Python: [模式下拉] [路径区域] ──
-        main_layout.addWidget(QLabel("🐍 Python:"))
+        title_label = QLabel("🐍 Python:")
+        title_label.setFixedHeight(row_height)
+        title_label.setWordWrap(False)
+        main_layout.addWidget(title_label)
 
         mode_combo = QComboBox()
         mode_combo.addItem("系统默认", "system")
         mode_combo.addItem("Conda环境", "conda")
         mode_combo.addItem("自定义路径", "custom")
         mode_combo.setMinimumWidth(110)
+        mode_combo.setFixedHeight(row_height)
+        mode_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         main_layout.addWidget(mode_combo)
 
         # 路径区域控件（根据模式显示/隐藏）
         # 系统默认：只读标签
         sys_label = QLabel()
         sys_label.setStyleSheet("color: #888; font-size: 11px;")
+        sys_label.setFixedHeight(row_height)
+        sys_label.setWordWrap(False)
+        sys_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        sys_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         main_layout.addWidget(sys_label, stretch=1)
 
         # conda：环境下拉
         conda_combo = QComboBox()
         conda_combo.setMinimumWidth(180)
+        conda_combo.setFixedHeight(row_height)
+        conda_combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         conda_envs = self._detect_conda_envs()
         for name, path in conda_envs:
             conda_combo.addItem(f"{name}  ({path})", name)
@@ -1156,17 +1273,23 @@ class MainWindow(QMainWindow):
         # 自定义：路径输入+浏览
         custom_edit = QLineEdit()
         custom_edit.setPlaceholderText("输入 python.exe 完整路径")
+        custom_edit.setFixedHeight(row_height)
+        custom_edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         custom_edit.setVisible(False)
         main_layout.addWidget(custom_edit, stretch=1)
 
         btn_browse = QPushButton("浏览…")
         btn_browse.setFixedWidth(55)
+        btn_browse.setFixedHeight(row_height)
         btn_browse.setVisible(False)
         main_layout.addWidget(btn_browse)
 
         # 错误提示（紧跟在路径区域后面）
         error_label = QLabel("")
         error_label.setStyleSheet("color: #ff4444; font-size: 11px;")
+        error_label.setFixedHeight(row_height)
+        error_label.setWordWrap(False)
+        error_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         error_label.setVisible(False)
         main_layout.addWidget(error_label)
 
@@ -1286,7 +1409,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "关于 哆啦A梦百宝箱",
-            "<h3>哆啦A梦百宝箱 v1.1</h3>"
+            "<h3>哆啦A梦百宝箱 v1.2</h3>"
             "<p>一个基于 PySide6 的 Python 脚本 GUI 管理工具。</p>"
             "<p><b>功能特性：</b></p>"
             "<ul>"

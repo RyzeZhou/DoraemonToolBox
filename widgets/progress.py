@@ -1,7 +1,7 @@
 """
 进度监控控件
 """
-from PySide6.QtWidgets import QProgressBar, QWidget, QVBoxLayout, QLabel
+from PySide6.QtWidgets import QProgressBar, QWidget, QVBoxLayout, QLabel, QHBoxLayout
 from PySide6.QtCore import Qt, QTimer, Signal
 from typing import Optional
 
@@ -23,13 +23,23 @@ class ProgressWidget(QWidget):
 
     def _setup_ui(self):
         """初始化 UI"""
-        layout = QVBoxLayout()
-        layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(5)
+        layout = QHBoxLayout()
+        layout.setContentsMargins(5, 4, 5, 4)
+        layout.setSpacing(8)
 
-        # 标签
-        self.label = QLabel("进度:")
-        layout.addWidget(self.label)
+        self.title_label = QLabel("进度")
+        self.title_label.setFixedWidth(44)
+        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setStyleSheet("font-size: 11pt; font-weight: 600;")
+        layout.addWidget(self.title_label)
+
+        right_layout = QVBoxLayout()
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(4)
+
+        self.label = QLabel("")
+        self.label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        right_layout.addWidget(self.label)
 
         # 进度条
         self.progress_bar = QProgressBar()
@@ -37,11 +47,13 @@ class ProgressWidget(QWidget):
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("%p%")
-        layout.addWidget(self.progress_bar)
+        right_layout.addWidget(self.progress_bar)
+
+        layout.addLayout(right_layout, stretch=1)
 
         self.setLayout(layout)
 
-    def update_progress(self, percentage: int) -> None:
+    def update_progress(self, percentage: int, detail: str = "") -> None:
         """
         更新进度
 
@@ -51,17 +63,18 @@ class ProgressWidget(QWidget):
         # 限制范围
         percentage = max(0, min(100, percentage))
 
-        # 仅当百分比变化时更新
-        if percentage != self.current_percentage:
+        # 仅当百分比或说明变化时更新
+        label_text = detail if detail else f"{percentage}%"
+        if percentage != self.current_percentage or self.label.text() != label_text:
             self.current_percentage = percentage
             self.progress_bar.setValue(percentage)
-            self.label.setText(f"进度: {percentage}%")
+            self.label.setText(label_text)
 
     def reset(self) -> None:
         """重置进度"""
         self.current_percentage = 0
         self.progress_bar.reset()
-        self.label.setText("进度:")
+        self.label.setText("")
 
     def show_message(self, message: str) -> None:
         """显示消息（替代进度）"""

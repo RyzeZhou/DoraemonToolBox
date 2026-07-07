@@ -1,8 +1,8 @@
 """
-tqdm 进度条拦截器：从 stdout 中提取进度百分比
+tqdm 进度条拦截器：从 stdout 中提取进度百分比和进度文本
 """
 import re
-from typing import Optional, Tuple
+from typing import Optional
 from PySide6.QtCore import QObject, Signal, QTimer
 
 
@@ -19,10 +19,14 @@ class TqdmInterceptor(QObject):
 
     # tqdm 标准进度正则：匹配类似 "33%|" 或 "50.0% |"（支持整数、浮点、空格）
     TQDM_PATTERN = re.compile(r'(\d+(?:\.\d+)?)%\s*\|')
+    TQDM_LINE_PATTERN = re.compile(r'[^\r\n]*\d+(?:\.\d+)?%\s*\|[^\r\n]*')
+    TQDM_BAR_DETAIL_PATTERN = re.compile(r'\s*\d+(?:\.\d+)?%\s*\|[^|]*\|\s*')
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.last_percentage = 0
+        self.last_text = ""
+        self.last_detail = ""
         self._buffer = ""
         self._timer = QTimer()
         self._timer.setSingleShot(True)
@@ -42,18 +46,25 @@ class TqdmInterceptor(QObject):
         """
         self._buffer += text
 
-        # 尝试在缓冲区中匹配
-        match = self.TQDM_PATTERN.search(self._buffer)
+        # 尝试在缓冲区中匹配最后一条 tqdm 进度行
+        line_matches = list(self.TQDM_LINE_PATTERN.finditer(self._buffer))
+        match = line_matches[-1] if line_matches else None
         if match:
             try:
+                line = match.group(0).strip()
+                percent_match = self.TQDM_PATTERN.search(line)
+                if not percent_match:
+                    return None
                 # 支持整数或浮点数，转换为整数百分比
-                percentage = float(match.group(1))
+                percentage = float(percent_match.group(1))
                 percentage = int(round(percentage))
                 # 限制在 0-100
                 percentage = max(0, min(100, percentage))
 
                 # 记录最后一次的百分比
                 self.last_percentage = percentage
+                self.last_text = line
+                self.last_detail = self._clean_progress_detail(line)
 
                 # 清空已处理的部分（保留最后几行以防多行进度）
                 self._buffer = self._buffer[match.end():]
@@ -77,6 +88,18 @@ class TqdmInterceptor(QObject):
     def get_last_percentage(self) -> int:
         """获取最后一次的百分比"""
         return self.last_percentage
+
+    def get_last_text(self) -> str:
+        """获取最后一次 tqdm 进度行文本"""
+        return self.last_text
+
+    def get_last_detail(self) -> str:
+        """获取去掉百分比和 ASCII 进度条后的 tqdm 文本"""
+        return self.last_detail
+
+    def _clean_progress_detail(self, line: str) -> str:
+        cleaned = self.TQDM_BAR_DETAIL_PATTERN.sub(" ", line, count=1).strip()
+        return re.sub(r'\s+', ' ', cleaned)
 
     def clean_tqdm_from_text(self, text: str) -> str:
         """
